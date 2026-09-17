@@ -41,7 +41,9 @@ pip install git+https://github.com/cptskippy/asf02.git
 ```
 
 ### From PyPI
-`asf02` is **not** currently available on PyPI — coming soon.
+```bash
+pip install asf02
+```
 
 ## Quick start
 

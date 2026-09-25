@@ -151,25 +151,52 @@ class ASF02Client:
 
     async def status(self) -> dict:
         """Live status: ``s`` state, ``n``/``t`` total feed counter, ``b``
-        battery (units unconfirmed; <=410 = low per vendor app), ``u`` uptime-ish
-        counter, ``d`` (unknown, 0)."""
+        battery, ``u`` uptime-ish counter, ``d`` (unknown, 0).
+
+        ``s`` is 1 while the motor dispenses (and 0 otherwise) — poll it to
+        track a feed (see :meth:`feed`). ``n`` increments live, ~1 per
+        portion, during a dispense.
+
+        ``b`` units are unconfirmed and power-source-dependent: ~522-524 at
+        rest on fresh NiMH AAs (dropping ~7 over 50 portions of motor time,
+        front-loaded), ~428-461 on a USB adapter. ``b <= 410`` triggers the
+        vendor app's low-battery warning — treat that as the only reliable
+        semantic, not a voltage.
+        """
         return await self._request("feeder.status")
 
     async def feed(self, portions: int) -> Any:
         """Dispense ``portions`` immediately (1-99, matching the vendor app's
-        picker). Returns ``True`` as a near-instant ACK — the dispense runs
-        ASYNCHRONOUSLY afterwards (s=1 while the motor runs; a single
-        feed(10) was observed to take ~50s). The device drops the GATT
-        connection during the feed, so do NOT poll status() while it runs:
-        disconnect, wait, reconnect, then read. The status ``n``/``t``
-        counters increment by ``portions`` (live-verified: feed(10) moved n
-        by +10, confirmed across three independent deltas)."""
+        picker). Returns ``True`` as a near-instant ACK (observed ~90 ms) —
+        the dispense runs ASYNCHRONOUSLY afterwards (~5.1 s per portion; a
+        feed(50) ran ~250 s), with ``status()`` reporting ``s=1`` for the
+        duration.
+
+        Mid-feed polling is supported: dedicated probes (2026-09-18, ~60
+        portions, 90+ mid-feed status polls on adapter and battery power)
+        saw the GATT link stay up throughout every dispense, with status
+        replies at normal latency. Poll ``status()`` until ``s`` returns to
+        0 if you need a completion signal. (An earlier session observed the
+        link drop during a feed; it did not reproduce in the probes. If it
+        does happen to you, fall back to: disconnect, wait
+        ``portions * 5.1 + margin`` seconds, reconnect, read status.)
+
+        The ``n``/``t`` counters increment LIVE, ~1 per portion, while the
+        motor runs (feed(50) climbed by 50 during the dispense), and the
+        total delta equals ``portions``. A mid-feed ``stop()`` cancels the
+        dispense before any portion counts (n/t delta 0).
+        """
         if not isinstance(portions, int) or not 1 <= portions <= 99:
             raise ValueError("portions must be an integer 1..99")
         return await self._request("feeder.feed", {"n": portions})
 
     async def stop(self) -> Any:
-        """Stop an in-progress feed (safe no-op when idle)."""
+        """Stop an in-progress feed (safe no-op when idle).
+
+        Verified cancel semantics (2026-09-18): called mid-feed it stops the
+        dispense *before* any portion counts — the ``n``/``t`` counters
+        delta was 0 for a ``feed(3)`` stopped at ~2 s. Returns ``True``.
+        """
         return await self._request("feeder.stop")
 
     async def get_schedule(self) -> list:

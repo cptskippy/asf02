@@ -113,6 +113,28 @@ manufacturer data (company `0xFFFF`) starting `02 03`, with the MAC embedded.
   want schedules to stay on time — since the schedule runs on the device
   clock, not yours.
 
+## Home Assistant
+
+The library builds its own `bleak.BleakClient` by default. To run inside
+Home Assistant the connection must go through HA's managed Bluetooth
+stack (connection slots, adapter/ESPHome-proxy routing), so pass a
+`client_factory` that returns HA's wrapper instead:
+
+```python
+from homeassistant.components import bluetooth
+
+ble_device = bluetooth.async_ble_device_from_address(
+    hass, address, connectable=True)
+async with ASF02Client(address, token,
+                       client_factory=lambda addr: ble_device) as feeder:
+    ...
+```
+
+The factory may return a pre-constructed client; only its
+`connect`/`disconnect`/`start_notify`/`write_gatt_char` methods are used.
+Without the argument the library behaves exactly as before (plain bleak),
+so standalone use and the CLI example are unaffected.
+
 ## API Status
 
 | Method | Status |

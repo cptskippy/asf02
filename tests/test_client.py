@@ -152,3 +152,54 @@ async def test_request_without_connect_raises(client_with_fake):
     c = ASF02Client("AA:BB:CC:DD:EE:FF", "tok")
     with pytest.raises(ASF02ProtocolError):
         await c.info()
+
+
+async def test_client_factory_is_used(monkeypatch):
+    """An injected factory must build the GATT client (seam for HA)."""
+    from asf02 import client as client_mod
+
+    calls = []
+
+    class Injected:
+        def __init__(self, address):
+            calls.append(address)
+            self._fake = FakeBleakClient({"info": {"i": 1, "r": {"f": "1.0", "z": 0}}})
+            self.address = address
+
+        def __getattr__(self, name):
+            return getattr(self._fake, name)
+
+    # If the default path were taken, the monkeypatched global would be hit.
+    class NotUsed:
+        def __init__(self, *a, **k):
+            raise AssertionError("default BleakClient path was used")
+
+    monkeypatch.setattr(client_mod, "BleakClient", NotUsed)
+    c = ASF02Client("AA:BB:CC:DD:EE:FF", "tok", post_connect_delay=0.0,
+                    client_factory=lambda addr: Injected(addr))
+    await c.connect()
+    info = await c.info()
+    assert info["f"] == "1.0"
+    assert calls == ["AA:BB:CC:DD:EE:FF"]
+    await c.disconnect()
+
+
+async def test_client_factory_preconstructed_client():
+    """HA injects a lambda returning a pre-built wrapper — no constructor call.
+
+    The factory may return any object exposing the bleak client surface;
+    verify the full command path works through one.
+    """
+    fake = FakeBleakClient({
+        "unlock": {"i": 1, "r": {"l": 1, "t": 1, "z": 0, "d": "0000", "r": 2, "k": "x"}},
+        "feeder.status": {"i": 2, "r": {"s": 0, "n": 7, "b": 520, "u": 1, "t": 7, "d": 0}},
+    })
+    c = ASF02Client("AA:BB:CC:DD:EE:FF", "tok", post_connect_delay=0.0,
+                    client_factory=lambda addr: fake)
+    async with c:
+        await c.unlock()
+        st = await c.status()
+        assert st["n"] == 7
+        assert fake.connected
+    assert not fake.connected  # disconnect() forwarded to the injected client
+

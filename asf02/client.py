@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import json
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Protocol, Sequence
 
 from bleak import BleakClient
 
@@ -55,6 +55,43 @@ def _wrap_errors(e: Exception) -> Exception:
     return e
 
 
+BleakClientFactory = Callable[[str], Any]
+"""Callable that builds the GATT client for an address.
+
+Must return an object with the bleak-client surface documented by
+:class:`BleakClientLike` — ``bleak.BleakClient`` and HA's
+``HaBleakClientWrapper`` both qualify. Typed as ``Any`` on purpose:
+structural checks against third-party client classes are more noise than
+signal, and the factory may return a pre-constructed object whose
+constructor signature matches nothing.
+
+Defaults to plain ``BleakClient`` (standalone use). Home Assistant must
+inject its managed wrapper (built from
+``homeassistant.components.bluetooth.async_ble_device_from_address``) so
+the connection participates in HA's connection-slot manager and routes
+through the right adapter / ESPHome proxy.
+"""
+
+
+class BleakClientLike(Protocol):
+    """Documentation protocol: the minimal client surface :class:`ASF02Client`
+    drives. A factory may return a pre-constructed instance, so the
+    constructor is intentionally not part of this surface.
+    """
+
+    async def connect(self) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    async def start_notify(
+        self, char_uuid: str, cb: Callable[[Any, bytearray], None]
+    ) -> None: ...
+
+    async def write_gatt_char(
+        self, char_uuid: str, data: bytes, response: bool
+    ) -> None: ...
+
+
 class ASF02Client:
     """A single ASF02 feeder.
 
@@ -65,14 +102,30 @@ class ASF02Client:
             schedule = await f.get_schedule()
             await f.set_schedule([(15, 30, 1), (16, 0, 1)])
             await f.feed(1)
+
+    Home Assistant usage (inject the managed GATT wrapper so the link goes
+    through HA's connection-slot manager / adapter routing):
+
+        ble_device = bluetooth.async_ble_device_from_address(
+            hass, address, connectable=True)
+        async with ASF02Client(address, token,
+                               client_factory=lambda addr: ble_device) as f:
+            ...
     """
 
     def __init__(self, address: str, token: str, *, response_timeout: float = 10.0,
-                 post_connect_delay: float = 1.0):
+                 post_connect_delay: float = 1.0,
+                 client_factory: BleakClientFactory | None = None):
         self.address = address
         self.token = token
         self.response_timeout = response_timeout
         self.post_connect_delay = post_connect_delay
+        # Injectable GATT client builder. None → plain bleak (standalone use).
+        # Home Assistant passes a factory returning its managed wrapper so the
+        # link participates in HA's slot manager / adapter routing.
+        self._client_factory: BleakClientFactory = (
+            client_factory if client_factory is not None else lambda addr: BleakClient(addr, timeout=20)
+        )
         self._client: BleakClient | None = None
         self._req_id = 0
         self._pending: dict[int, asyncio.Future] = {}
@@ -89,10 +142,13 @@ class ASF02Client:
         await self.disconnect()
 
     async def connect(self) -> None:
-        """Connect and enable notifications. Device is locked until unlock()."""
+        """Connect and enable notifications. Device is locked until unlock().
+
+        Uses ``client_factory`` to build the GATT client (plain bleak by
+        default; inject HA's managed wrapper for Home Assistant use)."""
         if self._client is not None:
             return
-        client = BleakClient(self.address, timeout=20)
+        client = self._client_factory(self.address)
         await client.connect()
         await client.start_notify(NOTIFY_CHAR_UUID, self._on_notify)
         # Give the controller a moment before the first command (matches the
